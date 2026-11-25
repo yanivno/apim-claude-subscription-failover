@@ -167,8 +167,44 @@ Then run `claude`, followed by `/login` with the Team account.
      -d '{"model":"claude-sonnet-4-6","max_tokens":64,"messages":[{"role":"user","content":"ping"}]}'
    ```
    Expect `x-claude-route: foundry` and `x-foundry-remaining-tokens` headers. The header doesn't create a cache entry, so the next request goes back to Anthropic.
-3. **Real failover**: when a seat hits its limit, the first 429 should switch that user to Foundry. Use APIM **Test → Trace** to check the `retry` iteration and the `cache-store-value` duration.
-4. **Monitoring**: in App Insights → Metrics, under the custom namespace `claude-gateway`, `claude-requests` can be split by `Route` and `User`. Token counts by user come from `llm-emit-token-metric`.
+3. **Foundry route from Claude Code**: force the route in the client (see [Forcing the Foundry route](#forcing-the-foundry-route)) and do a real task: edit a file, use a tool, get a long streamed answer. This checks that Foundry accepts the `anthropic-beta` flags Claude Code sends. If it returns 400 errors that mention `anthropic-beta`, add those flags to the `betaForFoundry` filter in `policies/messages-operation-policy.xml`.
+4. **Real failover**: when a seat hits its limit, the first 429 should switch that user to Foundry. Use APIM **Test → Trace** to check the `retry` iteration and the `cache-store-value` duration.
+5. **Monitoring**: in App Insights → Metrics, under the custom namespace `claude-gateway`, `claude-requests` can be split by `Route` and `User`. Token counts by user come from `llm-emit-token-metric`.
+
+### Forcing the Foundry route
+
+The request header `x-claude-force-route: foundry` sends that request straight to Foundry, skipping Anthropic. It doesn't write a fallback cache entry, so requests without the header go back to the normal route. APIM removes the header before forwarding.
+
+In Claude Code, add it to `ANTHROPIC_CUSTOM_HEADERS`, one header per line, alongside the subscription key.
+
+**Settings file** (`~/.claude/settings.json`; restart `claude` after editing):
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://<apim-name>.azure-api.net/claude",
+    "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: <key>\nx-claude-force-route: foundry"
+  }
+}
+```
+
+**One shell session only** (overrides the settings file, nothing to clean up afterwards):
+
+```bash
+# macOS / Linux
+export ANTHROPIC_CUSTOM_HEADERS=$'Ocp-Apim-Subscription-Key: <key>\nx-claude-force-route: foundry'
+claude
+```
+
+```powershell
+# Windows PowerShell
+$env:ANTHROPIC_CUSTOM_HEADERS = "Ocp-Apim-Subscription-Key: <key>`nx-claude-force-route: foundry"
+claude
+```
+
+**To confirm it worked:** App Insights shows `Route = foundry` for your requests, and usage on your Team seat doesn't go up. To go back to the normal route, remove the `x-claude-force-route` line and keep the subscription key line.
+
+> Any user who knows this header can send their own traffic to Foundry, where it's billed to Azure and counted against their `llm-token-limit`. If you don't want users choosing their route, remove the `x-claude-force-route` clause from the `useFoundry` variable in `policies/messages-operation-policy.xml` after testing.
 
 ---
 
