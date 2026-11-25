@@ -12,39 +12,9 @@ No client-side switching. Each developer has one APIM subscription key and their
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph Dev["Developer workstation"]
-        CC["Claude Code<br/>/login = Team seat<br/>ANTHROPIC_BASE_URL = APIM"]
-    end
+![Architecture: Claude Code → APIM Standard v2 → Anthropic (Team seat) with 429 failover to Microsoft Foundry](docs/architecture.svg)
 
-    subgraph Azure["Azure subscription"]
-        subgraph APIM["API Management (Standard v2)"]
-            direction TB
-            AUTH["Subscription key check<br/>(1 subscription per user)"]
-            ROUTE{"User in<br/>fallback mode?"}
-            CACHE[("Cache<br/>claude-fallback-&lt;sub&gt;")]
-            LIMIT["llm-token-limit<br/>(Foundry route only)"]
-            RETRY["retry on 429<br/>switch backend + auth<br/>map model, strip oauth beta"]
-            MI(["System-assigned<br/>managed identity"])
-        end
-        FOUNDRY["Microsoft Foundry<br/>Claude deployments<br/>/anthropic/v1/messages"]
-        AI["Application Insights<br/>token + route metrics"]
-    end
-
-    ANTH["Anthropic API<br/>api.anthropic.com<br/>(Team subscription)"]
-
-    CC -- "Authorization: Bearer sk-ant-oat…<br/>Ocp-Apim-Subscription-Key" --> AUTH
-    AUTH --> ROUTE
-    ROUTE <-.-> CACHE
-    ROUTE -- "no" --> ANTH
-    ANTH -- "429" --> RETRY
-    ROUTE -- "yes" --> LIMIT --> RETRY
-    RETRY -- "Bearer (Entra, MI)" --> FOUNDRY
-    MI -.-> RETRY
-    RETRY -. "store fallback until reset" .-> CACHE
-    APIM -.-> AI
-```
+<sub>Source: [`docs/architecture.svg`](docs/architecture.svg) (editable). PNG export: [`docs/architecture.png`](docs/architecture.png).</sub>
 
 ### Request flow
 
@@ -86,6 +56,7 @@ The switch to Foundry happens before any response bytes reach Claude Code, so a 
 
 | Path | Purpose |
 |---|---|
+| `docs/architecture.svg` / `.png` | Architecture diagram |
 | `policies/api-policy.xml` | API-level policy: caller identity, strip gateway key, default backend, metrics, `x-claude-route` header |
 | `policies/messages-operation-policy.xml` | `POST /v1/messages`: 429 failover, fallback cache, model mapping, per-user limits |
 | `infra/main.bicep` | APIM Standard v2, backends, named values, API + operations, product, App Insights, diagnostics |
