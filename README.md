@@ -92,7 +92,7 @@ In `infra/main.bicepparam`, set:
 ### 4. Deploy
 
 ```bash
-az group create -n rg-claude-gw -l westeurope
+az group create -n rg-claude-gw -l swedencentral
 az deployment group create \
   -g rg-claude-gw \
   -f infra/main.bicep \

@@ -4,6 +4,8 @@ param apimName = 'apim-claude-gw-CHANGEME'
 param publisherEmail = 'platform@example.com'
 param publisherName = 'Platform Team'
 
+param location = 'swedencentral'
+
 param foundryAccountName = 'my-foundry-account'
 param foundryResourceGroup = 'rg-foundry'
 

@@ -7,7 +7,7 @@ targetScope = 'resourceGroup'
 param apimName string
 
 @description('Azure region for APIM and monitoring resources.')
-param location string = resourceGroup().location
+param location string = 'swedencentral'
 
 @description('Publisher email shown in APIM.')
 param publisherEmail string
