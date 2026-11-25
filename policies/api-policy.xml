@@ -1,0 +1,63 @@
+<!--
+  API-level policy: "claude" API on Azure API Management (Standard v2).
+
+  Applies to every operation. Responsibilities:
+    1. Identify the caller by APIM subscription key (one subscription per user).
+    2. Keep the client's Anthropic credential (Team subscription OAuth token in
+       Authorization) and anthropic-beta header untouched for the direct route.
+    3. Strip the APIM subscription key so it never reaches a backend.
+    4. Default backend = Anthropic direct (api.anthropic.com).
+    5. Emit token metrics per user.
+
+  The POST /v1/messages operation adds the Foundry failover on top of this
+  (see messages-operation-policy.xml).
+
+  NOTE: This file is well-formed XML (expressions are XML-escaped), so deploy it
+  with format "xml", not "rawxml".
+-->
+<policies>
+  <inbound>
+    <base />
+
+    <!-- Caller identity: the APIM subscription (one per user). -->
+    <set-variable name="callerId" value="@(context.Subscription.Id)" />
+    <set-variable name="callerName" value="@(context.Subscription.Name)" />
+
+    <!-- Never forward the gateway key to a model provider. -->
+    <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+
+    <!-- Default route: Anthropic direct, using the caller's own Team-seat OAuth token. -->
+    <set-backend-service backend-id="anthropic-direct" />
+    <set-variable name="route" value="anthropic" />
+
+    <!-- Per-user token metrics (Application Insights custom metrics). -->
+    <llm-emit-token-metric namespace="claude-gateway">
+      <dimension name="Subscription ID" value="@(context.Subscription.Id)" />
+      <dimension name="User" value="@(context.Subscription.Name)" />
+      <dimension name="API ID" />
+    </llm-emit-token-metric>
+  </inbound>
+
+  <backend>
+    <!-- Passthrough for every non-messages operation (count_tokens, models, etc.).
+         buffer-response="false" keeps SSE streams flowing. -->
+    <forward-request timeout="600" buffer-response="false" />
+  </backend>
+
+  <outbound>
+    <base />
+    <!-- Which backend actually served this request: anthropic | foundry -->
+    <set-header name="x-claude-route" exists-action="override">
+      <value>@((string)context.Variables.GetValueOrDefault("route", "anthropic"))</value>
+    </set-header>
+    <emit-metric name="claude-requests" namespace="claude-gateway" value="1">
+      <dimension name="User" value="@(context.Subscription.Name)" />
+      <dimension name="Route" value="@((string)context.Variables.GetValueOrDefault(&quot;route&quot;, &quot;anthropic&quot;))" />
+      <dimension name="Status" value="@(context.Response.StatusCode.ToString())" />
+    </emit-metric>
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>

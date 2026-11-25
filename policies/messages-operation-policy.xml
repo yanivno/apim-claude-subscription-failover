@@ -1,0 +1,143 @@
+<!--
+  Operation-level policy: POST /v1/messages on the "claude" API.
+
+  Flow
+    1. Try Anthropic direct with the caller's Team-seat OAuth token (passthrough).
+    2. If Anthropic answers 429 (seat usage limit or rate limit), resend the same
+       request to Claude on Microsoft Foundry using APIM's managed identity:
+         - Authorization  -> Entra token of the APIM managed identity
+         - anthropic-beta -> "oauth-*" flags removed (subscription-only)
+         - body.model     -> mapped to the Foundry deployment name
+    3. Remember the fallback per user (cache) until the Anthropic limit resets,
+       so following requests go straight to Foundry without a wasted 429 round trip.
+    4. While a user is on Foundry, enforce per-user token limits (Azure-billed traffic).
+
+  Retries happen before any response bytes reach the client, so a stream is never
+  switched mid-flight.
+
+  NOTE: well-formed XML (expressions are XML-escaped). Deploy with format "xml".
+-->
+<policies>
+  <inbound>
+    <base />
+
+    <!-- Named values loaded once per request. -->
+    <set-variable name="modelMap" value="{{claude-foundry-model-map}}" />
+    <set-variable name="fallbackKey" value="@(&quot;claude-fallback-&quot; + context.Subscription.Id)" />
+
+    <!-- Entra token for Foundry, from APIM's system-assigned managed identity (cached by APIM). -->
+    <authentication-managed-identity resource="{{foundry-token-audience}}" output-token-variable-name="foundryToken" ignore-error="false" />
+
+    <!-- anthropic-beta without the subscription-only oauth flag, for the Foundry route. -->
+    <set-variable name="betaForFoundry" value="@{
+        var raw = context.Request.Headers.GetValueOrDefault(&quot;anthropic-beta&quot;, &quot;&quot;);
+        var kept = raw.Split(',')
+                      .Select(x => x.Trim())
+                      .Where(x => x.Length > 0 &amp;&amp; !x.StartsWith(&quot;oauth-&quot;));
+        return string.Join(&quot;,&quot;, kept);
+    }" />
+
+    <!-- Is this user already in fallback mode? -->
+    <cache-lookup-value key="@((string)context.Variables[&quot;fallbackKey&quot;])" variable-name="fallbackActive" default-value="false" caching-type="prefer-external" />
+    <!-- Test switch: header "x-claude-force-route: foundry" sends this request straight to Foundry
+         (no cache entry is written). Remove this clause if you don't want users to pick the route. -->
+    <set-variable name="useFoundry" value="@(((string)context.Variables[&quot;fallbackActive&quot;]) == &quot;true&quot; || context.Request.Headers.GetValueOrDefault(&quot;x-claude-force-route&quot;, &quot;&quot;) == &quot;foundry&quot;)" />
+
+    <set-header name="x-claude-force-route" exists-action="delete" />
+
+    <!-- Per-user limits apply only to Azure-billed (Foundry) traffic. -->
+    <choose>
+      <when condition="@((bool)context.Variables[&quot;useFoundry&quot;])">
+        <llm-token-limit counter-key="@(context.Subscription.Id)"
+                         tokens-per-minute="{{foundry-tpm-per-user}}"
+                         token-quota="{{foundry-monthly-token-quota-per-user}}"
+                         token-quota-period="Monthly"
+                         estimate-prompt-tokens="false"
+                         remaining-quota-tokens-header-name="x-foundry-remaining-quota-tokens"
+                         remaining-tokens-header-name="x-foundry-remaining-tokens" />
+      </when>
+    </choose>
+  </inbound>
+
+  <backend>
+    <!--
+      Attempt 1: Anthropic direct (or Foundry straight away if the user is in fallback mode).
+      Attempt 2: only when attempt 1 was an Anthropic 429.
+    -->
+    <retry condition="@(context.Response != null &amp;&amp; context.Response.StatusCode == 429 &amp;&amp; !(bool)context.Variables[&quot;useFoundry&quot;])"
+           count="1" interval="0" first-fast-retry="true">
+      <choose>
+        <when condition="@((bool)context.Variables[&quot;useFoundry&quot;] || (context.Response != null &amp;&amp; context.Response.StatusCode == 429))">
+
+          <!-- Fresh 429 from Anthropic: remember fallback for this user until the limit resets. -->
+          <choose>
+            <when condition="@(!(bool)context.Variables[&quot;useFoundry&quot;])">
+              <cache-store-value key="@((string)context.Variables[&quot;fallbackKey&quot;])" value="true" caching-type="prefer-external"
+                                 duration="@{
+                  var r = context.Response;
+                  int ttl = int.Parse(&quot;{{claude-fallback-default-ttl-seconds}}&quot;);
+                  int s;
+                  if (int.TryParse(r.Headers.GetValueOrDefault(&quot;retry-after&quot;, &quot;&quot;), out s) &amp;&amp; s > 0) { ttl = s; }
+                  long resetEpoch;
+                  if (long.TryParse(r.Headers.GetValueOrDefault(&quot;anthropic-ratelimit-unified-reset&quot;, &quot;&quot;), out resetEpoch)) {
+                      long d = resetEpoch - DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                      if (d > 0) { ttl = (int)d; }
+                  }
+                  return Math.Min(Math.Max(ttl, 60), 18000);
+              }" />
+            </when>
+          </choose>
+
+          <set-variable name="useFoundry" value="@(true)" />
+          <set-variable name="route" value="foundry" />
+
+          <!-- Switch backend and credentials. -->
+          <set-backend-service backend-id="foundry-claude" />
+          <set-header name="Authorization" exists-action="override">
+            <value>@("Bearer " + (string)context.Variables["foundryToken"])</value>
+          </set-header>
+          <choose>
+            <when condition="@(((string)context.Variables[&quot;betaForFoundry&quot;]).Length == 0)">
+              <set-header name="anthropic-beta" exists-action="delete" />
+            </when>
+            <otherwise>
+              <set-header name="anthropic-beta" exists-action="override">
+                <value>@((string)context.Variables["betaForFoundry"])</value>
+              </set-header>
+            </otherwise>
+          </choose>
+
+          <!-- Map the Anthropic model ID to the Foundry deployment name (prefix match, "*" = default). -->
+          <set-body>@{
+              var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+              var requested = (string)body["model"] ?? "";
+              string target = null;
+              string fallback = null;
+              foreach (var pair in ((string)context.Variables["modelMap"]).Split(';'))
+              {
+                  var kv = pair.Split('=');
+                  if (kv.Length != 2) { continue; }
+                  var k = kv[0].Trim();
+                  var v = kv[1].Trim();
+                  if (k == "*") { fallback = v; }
+                  else if (target == null &amp;&amp; requested.StartsWith(k)) { target = v; }
+              }
+              body["model"] = target ?? fallback ?? requested;
+              return body.ToString(Newtonsoft.Json.Formatting.None);
+          }</set-body>
+        </when>
+      </choose>
+
+      <!-- Body is buffered so it can be replayed on the second attempt; response is streamed. -->
+      <forward-request timeout="600" buffer-request-body="true" buffer-response="false" />
+    </retry>
+  </backend>
+
+  <outbound>
+    <base />
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>

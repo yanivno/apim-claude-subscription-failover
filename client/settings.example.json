@@ -1,0 +1,6 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://<apim-name>.azure-api.net/claude",
+    "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: <per-user-subscription-key>"
+  }
+}
