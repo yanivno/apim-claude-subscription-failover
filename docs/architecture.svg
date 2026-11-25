@@ -143,12 +143,12 @@
   <rect x="950" y="440" width="180" height="46" rx="12" fill="#7C3AED"/>
   <rect x="950" y="472" width="180" height="14" fill="#7C3AED"/>
   <text x="1040" y="470" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">Microsoft Foundry</text>
-  <text x="966" y="512" class="tb" font-size="13.5">Claude deployments</text>
-  <text x="966" y="534" class="m" font-size="11.5">claude-sonnet (4-6)</text>
-  <text x="966" y="551" class="m" font-size="11.5">claude-haiku (4-5)</text>
-  <text x="966" y="568" class="m" font-size="11.5">claude-opus (optional)</text>
+  <text x="966" y="512" class="tb" font-size="13.5">Existing account</text>
+  <text x="966" y="534" class="s" font-size="12.5">Your Claude deployments</text>
+  <text x="966" y="551" class="m" font-size="11.5">claude-sonnet=&lt;depl&gt;</text>
+  <text x="966" y="568" class="m" font-size="11.5">*=&lt;default depl&gt;</text>
   <text x="966" y="596" class="m" font-size="11.5">/anthropic/v1/messages</text>
-  <text x="966" y="626" class="s" font-size="12.5">Entra only (MI)</text>
+  <text x="966" y="626" class="s" font-size="12.5">Entra auth (APIM MI)</text>
   <text x="966" y="646" class="s" font-size="12.5">Billed to Azure</text>
 
   <!-- ===================== ANTHROPIC ===================== -->

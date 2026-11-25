@@ -16,46 +16,16 @@ param publisherEmail string
 param publisherName string
 
 // ---------------------------------------------------------------------------
-// Foundry: deploy a new account + Claude deployments (default), or use an existing one
+// Existing Microsoft Foundry account with Claude deployments (not created here)
 // ---------------------------------------------------------------------------
-@description('true = create the Foundry account, project and Claude deployments in this resource group. false = use an existing account (foundryAccountName / foundryResourceGroup / foundryModelMap).')
-param deployFoundry bool = true
+@description('Name of the existing Microsoft Foundry (AIServices) account that hosts the Claude deployments.')
+param foundryAccountName string
 
-@description('Region for the Foundry account. Claude (Global Standard) is offered in eastus2, swedencentral and westus2; check the live catalog for your models.')
-param foundryLocation string = 'swedencentral'
-
-@description('Foundry account name (globally unique; also the custom subdomain). For deployFoundry=false, the existing account name.')
-param foundryAccountName string = 'claude-gw-foundry-${uniqueString(resourceGroup().id)}'
-
-@description('Existing account only: resource group of the Foundry account.')
+@description('Resource group of the existing Foundry account.')
 param foundryResourceGroup string = resourceGroup().name
 
-@description('''Claude deployments to create (deployFoundry=true).
-- name: deployment name (stable, version-independent; what the gateway sends as "model")
-- model: Foundry catalog model ID (list with scripts/list-claude-models.sh)
-- version: catalog version ("1" = hosted on Anthropic infrastructure, "2" = hosted on Azure where offered)
-- capacity: thousands of tokens per minute
-- routePrefix: Anthropic model-ID prefix Claude Code sends that should land on this deployment
-The first entry is also the default for unmatched model IDs.''')
-param claudeDeployments array = [
-  { name: 'claude-sonnet', model: 'claude-sonnet-4-6', version: '1', capacity: 25, routePrefix: 'claude-sonnet' }
-  { name: 'claude-haiku', model: 'claude-haiku-4-5', version: '1', capacity: 25, routePrefix: 'claude-haiku' }
-]
-
-@description('Legal entity name sent to Anthropic in modelProviderData (required when deployFoundry=true).')
-param claudeOrganizationName string = ''
-
-@description('Two-letter ISO country code of the organization.')
-@minLength(2)
-@maxLength(2)
-param claudeCountryCode string = 'IL'
-
-@description('Organization industry (lowercase).')
-@allowed([ 'technology', 'finance', 'healthcare', 'education', 'retail', 'manufacturing', 'government', 'media', 'other' ])
-param claudeIndustry string = 'technology'
-
-@description('Existing account only: Anthropic model ID prefix -> Foundry deployment name. Format "prefix=deployment;...;*=default". Ignored when deployFoundry=true (built from claudeDeployments).')
-param foundryModelMap string = 'claude-sonnet=claude-sonnet;claude-haiku=claude-haiku;*=claude-sonnet'
+@description('Anthropic model ID prefix -> Foundry deployment name. Format "prefix=deployment;...;*=default". First matching prefix wins. Get deployment names with scripts/list-foundry-deployments.sh.')
+param foundryModelMap string
 
 @description('Entra audience for Foundry Claude inference tokens.')
 param foundryTokenAudience string = 'https://ai.azure.com'
@@ -127,31 +97,9 @@ resource aiLogger 'Microsoft.ApiManagement/service/loggers@2024-05-01' = {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Microsoft Foundry (optional)
-// ---------------------------------------------------------------------------
-module foundry 'modules/foundry.bicep' = if (deployFoundry) {
-  name: 'foundry-${uniqueString(resourceGroup().id)}'
-  params: {
-    location: foundryLocation
-    accountName: foundryAccountName
-    projectName: 'claude-gateway'
-    claudeDeployments: claudeDeployments
-    claudeOrganizationName: claudeOrganizationName
-    claudeCountryCode: claudeCountryCode
-    claudeIndustry: claudeIndustry
-  }
-}
-
-var effectiveFoundryRg = deployFoundry ? resourceGroup().name : foundryResourceGroup
-
-// prefix=deployment for each Claude deployment, first deployment as the default
-var generatedModelMap = '${join(map(claudeDeployments, d => '${d.routePrefix}=${d.name}'), ';')};*=${claudeDeployments[0].name}'
-var effectiveModelMap = deployFoundry ? generatedModelMap : foundryModelMap
-
 // Named values referenced by the policies
 var namedValues = {
-  'claude-foundry-model-map': effectiveModelMap
+  'claude-foundry-model-map': foundryModelMap
   'foundry-token-audience': foundryTokenAudience
   'claude-fallback-default-ttl-seconds': string(fallbackDefaultTtlSeconds)
   'foundry-tpm-per-user': string(foundryTpmPerUser)
@@ -302,10 +250,9 @@ resource productApi 'Microsoft.ApiManagement/service/products/apis@2024-05-01' =
 // Foundry access for the APIM managed identity
 module foundryRole 'modules/foundry-role.bicep' = {
   name: 'foundry-role-${apimName}'
-  scope: resourceGroup(effectiveFoundryRg)
+  scope: resourceGroup(foundryResourceGroup)
   params: {
-    // Referencing the module output makes the role assignment wait for the new account.
-    foundryAccountName: deployFoundry ? foundry!.outputs.accountName : foundryAccountName
+    foundryAccountName: foundryAccountName
     principalId: apim.identity.principalId
   }
 }
@@ -313,4 +260,4 @@ module foundryRole 'modules/foundry-role.bicep' = {
 output gatewayUrl string = '${apim.properties.gatewayUrl}/claude'
 output apimPrincipalId string = apim.identity.principalId
 output foundryAccount string = foundryAccountName
-output foundryModelMap string = effectiveModelMap
+output foundryModelMap string = foundryModelMap

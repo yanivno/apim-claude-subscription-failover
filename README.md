@@ -60,10 +60,9 @@ The switch to Foundry happens before any response bytes reach Claude Code, so a 
 | `policies/api-policy.xml` | API-level policy: caller identity, strip gateway key, default backend, metrics, `x-claude-route` header |
 | `policies/messages-operation-policy.xml` | `POST /v1/messages`: 429 failover, fallback cache, model mapping, per-user limits |
 | `infra/main.bicep` | APIM Standard v2, backends, named values, API + operations, product, App Insights, diagnostics |
-| `infra/modules/foundry.bicep` | Foundry account, project and Claude model deployments (`deployFoundry=true`) |
 | `infra/modules/foundry-role.bicep` | Grants APIM's managed identity *Cognitive Services User* on the Foundry account |
 | `infra/main.bicepparam` | Parameters to edit before you deploy |
-| `scripts/list-claude-models.sh` | Lists Claude model IDs, versions and SKUs offered in a region |
+| `scripts/list-foundry-deployments.sh` | Lists the Claude deployments on your Foundry account and prints a suggested `foundryModelMap` |
 | `scripts/add-user.sh` | Creates a user's APIM subscription and prints their Claude Code settings |
 | `client/settings.example.json` | Claude Code `~/.claude/settings.json` example |
 
@@ -74,12 +73,9 @@ The switch to Foundry happens before any response bytes reach Claude Code, so a 
 ### 1. Prerequisites
 
 - Claude **Team** plan, with members using Claude Code.
-- Azure CLI 2.60+ with Bicep. **Owner** (or Contributor + User Access Administrator) on the target resource group, because the template assigns a role.
-- An Azure subscription that can buy Claude in Microsoft Foundry:
-  - a paid subscription with pay-as-you-go billing, in a country or region where Anthropic sells the models
-  - **not supported:** Cloud Solution Provider (CSP) subscriptions, free trials, student or startup-credit subscriptions, and sponsored credit-only subscriptions
-  - permission to create Azure Marketplace subscriptions, since deploying a Claude model subscribes to the Anthropic offer
-- **Or** an existing Foundry account that already has Claude deployments (set `deployFoundry = false`).
+- An **existing Microsoft Foundry account** with at least one Claude deployment. This template doesn't create Foundry or deploy models.
+- Azure CLI 2.60+ with Bicep.
+- **Owner** (or Contributor + User Access Administrator) on the APIM resource group **and** on the Foundry account, because the template gives APIM's managed identity a role on the account.
 
 ### 2. Configure the Team plan
 
@@ -88,21 +84,24 @@ If usage credits are on, Anthropic keeps serving those users and bills the overa
 
 ### 3. Edit parameters
 
+Find your Foundry account and its Claude deployments:
+
+```bash
+# Foundry accounts in the subscription
+az cognitiveservices account list --query "[?kind=='AIServices'].{name:name, rg:resourceGroup, location:location}" -o table
+
+# Claude deployments on the account, plus a suggested model map
+./scripts/list-foundry-deployments.sh <foundry-rg> <foundry-account>
+```
+
 In `infra/main.bicepparam`, set:
 
 - `apimName`, `publisherEmail`, `publisherName`
-- **Foundry, new account (default `deployFoundry = true`):**
-  - `claudeOrganizationName`, `claudeCountryCode`, `claudeIndustry`. These are sent to Anthropic in `modelProviderData`, which is **required** for Claude deployments. Use your legal entity name. The industry must be lowercase.
-  - `claudeDeployments`: one entry per model. `name` is the deployment name the gateway sends, `model` and `version` come from the catalog, `capacity` is in thousands of tokens per minute, and `routePrefix` is the Anthropic model-ID prefix Claude Code sends. The first entry is also the default for any model ID that doesn't match. To see what your subscription can deploy in the region:
-    ```bash
-    ./scripts/list-claude-models.sh swedencentral
-    ```
-  - `foundryLocation`: Claude Global Standard is offered in `eastus2`, `swedencentral` and `westus2`. Availability differs by model, so check the script output.
-  - The model map the policy uses is generated from `claudeDeployments` (`routePrefix=name;...;*=<first name>`).
-- **Foundry, existing account (`deployFoundry = false`):** `foundryAccountName`, `foundryResourceGroup`, and `foundryModelMap` (`prefix=deployment;...;*=default`; the first matching prefix wins, so list more specific prefixes first).
+- `foundryAccountName`, `foundryResourceGroup`: your existing account
+- `foundryModelMap`: `prefix=deployment;...;*=default`. Claude Code sends Anthropic model IDs (for example `claude-sonnet-…`), and the **first matching prefix** decides which Foundry deployment gets the request, so list more specific prefixes first. `*` catches any model ID that doesn't match, for example Opus when you have no Opus deployment.
 - Per-user Foundry limits: `foundryTpmPerUser`, `foundryMonthlyTokenQuotaPerUser`
 
-> **Marketplace terms:** deploying a Claude model accepts the Anthropic Marketplace offer for the organization in `modelProviderData`. Review [Anthropic's commercial terms](https://www.anthropic.com/legal/commercial-terms) before deploying. If your organization requires explicit acceptance, accept the Anthropic offer in the portal first.
+The deployment fails at the start if the account or resource group doesn't exist. Deployment names in the map aren't checked, so a typo shows up later as a 404 on the fallback route.
 
 ### 4. Deploy
 
@@ -114,7 +113,7 @@ az deployment group create \
   -p infra/main.bicepparam
 ```
 
-Provisioning Standard v2 typically takes a few minutes. The Claude deployments are created one at a time, and each can take anywhere from 30 seconds to about 20 minutes. The output `gatewayUrl` is the `ANTHROPIC_BASE_URL` value for clients.
+Provisioning Standard v2 typically takes a few minutes. The output `gatewayUrl` is the `ANTHROPIC_BASE_URL` value for clients.
 
 What the deployment creates:
 
@@ -127,9 +126,9 @@ What the deployment creates:
 | Product `claude-code` | Subscription required, no approval |
 | Named values | Model map, token audience, fallback TTL, per-user limits |
 | App Insights + logger | Metrics on, **no body logging** (keeps SSE streaming intact and prompts out of logs) |
-| Foundry account (`deployFoundry=true`) | `AIServices` S0, custom subdomain, **local auth disabled** (Entra only), project `claude-gateway` |
-| Claude deployments | One per `claudeDeployments` entry: Global Standard, `Anthropic` format, `modelProviderData`, created one at a time |
-| Role assignment | *Cognitive Services User* for the APIM identity on the Foundry account |
+| Role assignment | *Cognitive Services User* for the APIM identity on your existing Foundry account |
+
+Not created: the Foundry account, project and Claude deployments. They must already exist.
 
 ### 5. Onboard users
 
@@ -187,6 +186,6 @@ Then run `claude`, followed by `/login` with the Team account.
 - **Beta headers.** Only `oauth-*` flags are removed on the Foundry route. If Foundry rejects other beta flags Claude Code sends, add them to the filter in `betaForFoundry`.
 - **Cache.** `caching-type="prefer-external"` uses an external Redis cache if you configure one, otherwise APIM's built-in cache. With more than one APIM unit, the built-in cache isn't shared between units, so add an external Azure Managed Redis cache.
 - **Foundry token audience.** APIM requests its managed-identity token for `https://ai.azure.com`, the scope Microsoft documents for Claude on Foundry. If the fallback route returns 401, check the role assignment first, since role assignments can take a few minutes to take effect.
-- **Quota.** Deployment capacity counts against your subscription's Claude quota in the region. If a deployment fails with `InsufficientQuota`, lower `capacity` or request more quota.
+- **Foundry capacity.** Fallback traffic from every user who has hit their seat limit shares the capacity (TPM) of your Foundry deployments. Size them, or set `foundryTpmPerUser`, to match the overflow you expect.
 - **Scope.** This covers **Claude Code** (CLI and the Code tab in Claude Desktop). Claude Desktop **chat** on a Team login talks to Anthropic directly and doesn't go through any gateway.
 - **Policy format.** Both policy files are well-formed XML with escaped expressions, deployed as `format: 'xml'`. If you paste them into the portal editor, they appear unescaped, which is expected.
